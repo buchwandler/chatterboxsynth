@@ -1,0 +1,81 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: 0.1.1
+git_base_ref: 9f55a108c28717cd639db4b3ae1b8f4db98e6395
+git_base_sha: 9f55a108c28717cd639db4b3ae1b8f4db98e6395
+git_head_ref: 92d51469b56f104521053a57d7119c4716c29405
+git_head_sha: 92d51469b56f104521053a57d7119c4716c29405
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added a stable request API for model-token measurement and runtime capability inspection
+    status: accepted
+    source_refs:
+      - git:92d51469b56f104521053a57d7119c4716c29405
+    paths:
+      - chatterboxsynth/__init__.py
+      - chatterboxsynth/api.py
+      - chatterboxsynth/request.py
+      - chatterboxsynth/runtime.py
+      - chatterboxsynth/types.py
+    sources: []
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added local-only opening of installed model profiles without catalog access or installation
+    status: accepted
+    source_refs: []
+    paths:
+      - chatterboxsynth/errors.py
+      - chatterboxsynth/runtime.py
+    sources:
+      - git:92d51469b56f104521053a57d7119c4716c29405
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: Added normalized bundle discovery with catalog metadata and installed-profile availability
+    status: accepted
+    source_refs: []
+    paths:
+      - chatterboxsynth/__init__.py
+      - chatterboxsynth/discovery.py
+      - chatterboxsynth/types.py
+    sources:
+      - git:92d51469b56f104521053a57d7119c4716c29405
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: docs
+    summary: Documented request measurement, local model opening, and bundle discovery behavior
+    status: accepted
+    source_refs: []
+    paths:
+      - README.md
+      - docs/architecture.md
+    sources:
+      - git:92d51469b56f104521053a57d7119c4716c29405
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: quality
+    summary: Improved focused coverage for request contracts, discovery, and managed runtime lifecycle
+    status: accepted
+    source_refs: []
+    paths:
+      - tests/test_api.py
+      - tests/test_discovery.py
+      - tests/test_runtime.py
+    sources:
+      - git:92d51469b56f104521053a57d7119c4716c29405
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

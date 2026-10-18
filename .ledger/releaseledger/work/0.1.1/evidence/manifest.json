@@ -1,0 +1,36 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 767,
+      "deletions": 4,
+      "patch_file": "92d5146.patch",
+      "patch_sha256": "e28f8ae2980524ac617744a939612cbedd867b21eaf533e3537cfa1197362257",
+      "paths": [
+        "README.md",
+        "chatterboxsynth/__init__.py",
+        "chatterboxsynth/api.py",
+        "chatterboxsynth/discovery.py",
+        "chatterboxsynth/errors.py",
+        "chatterboxsynth/request.py",
+        "chatterboxsynth/runtime.py",
+        "chatterboxsynth/types.py",
+        "docs/architecture.md",
+        "tests/test_api.py",
+        "tests/test_discovery.py",
+        "tests/test_runtime.py"
+      ],
+      "sha": "92d51469b56f104521053a57d7119c4716c29405",
+      "short_sha": "92d5146",
+      "source_ref": "git:92d51469b56f104521053a57d7119c4716c29405"
+    }
+  ],
+  "git_base_ref": "9f55a108c28717cd639db4b3ae1b8f4db98e6395",
+  "git_base_sha": "9f55a108c28717cd639db4b3ae1b8f4db98e6395",
+  "git_head_ref": "92d51469b56f104521053a57d7119c4716c29405",
+  "git_head_sha": "92d51469b56f104521053a57d7119c4716c29405",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.1.1",
+  "schema_version": 1
+}

@@ -1,0 +1,23 @@
+rows:
+  - sha: 92d51469b56f104521053a57d7119c4716c29405
+    inspected: true
+    inspected_paths:
+      - README.md
+      - chatterboxsynth/__init__.py
+      - chatterboxsynth/api.py
+      - chatterboxsynth/discovery.py
+      - chatterboxsynth/errors.py
+      - chatterboxsynth/request.py
+      - chatterboxsynth/runtime.py
+      - chatterboxsynth/types.py
+      - docs/architecture.md
+      - tests/test_api.py
+      - tests/test_discovery.py
+      - tests/test_runtime.py
+    observed_behavior: "Adds the public request API contract, exact tokenizer-level request measurement, local-only managed model opening, and normalized catalog/installed-profile discovery; documents and tests these capabilities."
+    public_impact: public
+    decision: accepted
+    target_entry_key: request-and-discovery-api
+    target_entry_id: null
+    notes: "Reviewed the implementation, documentation, and focused tests."
+    stale: false

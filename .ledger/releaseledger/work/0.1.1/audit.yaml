@@ -1,0 +1,40 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: 0.1.1
+git_base_ref: v0.1.0
+git_base_sha: 9f55a108c28717cd639db4b3ae1b8f4db98e6395
+git_head_ref: HEAD
+git_head_sha: 92d51469b56f104521053a57d7119c4716c29405
+git_range: 9f55a108c28717cd639db4b3ae1b8f4db98e6395..92d51469b56f104521053a57d7119c4716c29405
+commit_count: 1
+rows:
+  - sha: 92d51469b56f104521053a57d7119c4716c29405
+    source_ref: git:92d51469b56f104521053a57d7119c4716c29405
+    short_sha: 92d5146
+    changed_paths:
+      - README.md
+      - chatterboxsynth/__init__.py
+      - chatterboxsynth/api.py
+      - chatterboxsynth/discovery.py
+      - chatterboxsynth/errors.py
+      - chatterboxsynth/request.py
+      - chatterboxsynth/runtime.py
+      - chatterboxsynth/types.py
+      - docs/architecture.md
+      - tests/test_api.py
+      - tests/test_discovery.py
+      - tests/test_runtime.py
+    stats:
+      files_changed: 12
+      insertions: 767
+      deletions: 4
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: add api for voicerender"

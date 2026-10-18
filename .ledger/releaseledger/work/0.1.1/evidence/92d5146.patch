@@ -1,0 +1,970 @@
+ README.md                    |   8 ++
+ chatterboxsynth/__init__.py  |  21 ++++-
+ chatterboxsynth/api.py       |  38 ++++++++
+ chatterboxsynth/discovery.py | 113 ++++++++++++++++++++++++
+ chatterboxsynth/errors.py    |   4 +
+ chatterboxsynth/request.py   |  63 +++++++++++++
+ chatterboxsynth/runtime.py   |  81 ++++++++++++++++-
+ chatterboxsynth/types.py     |  39 ++++++++
+ docs/architecture.md         |   2 +
+ tests/test_api.py            |  54 ++++++++++++
+ tests/test_discovery.py      | 142 +++++++++++++++++++++++++++++
+ tests/test_runtime.py        | 206 ++++++++++++++++++++++++++++++++++++++++++-
+ 12 files changed, 767 insertions(+), 4 deletions(-)
+
+diff --git a/README.md b/README.md
+index dffe5a2..d439b1c 100644
+--- a/README.md
++++ b/README.md
+@@ -37,6 +37,8 @@ with ChatterboxRuntime.from_pretrained("turbo", quality="fp32") as runtime:
+
+ Use `ChatterboxRuntime.load("/path/to/onnxvoice/install")` for an already-installed OnnxVoice bundle. This local path reads the install manifest and verifies artifact sizes and SHA-256 values; it does not query a catalog or access the network.
+
++For render-time opening of a managed model, use `ChatterboxRuntime.from_installed("nano", quality="cpu")`. It resolves and opens only a locally installed profile and never installs a model or refreshes a catalog. By contrast, `from_pretrained()` is the convenience path that may acquire and install a model.
++
+ ## CLI
+
+ ```bash
+@@ -54,6 +56,12 @@ Common options include `--provider cpu|cuda|auto`, `--offline`, `--cache-dir`, `
+
+ Synthesis is deterministic greedy decoding. Empty text is rejected. The MVP does not split long text, stitch chunks, use random sampling, apply PerTh, or persist voice states. `SynthesisResult` validates non-empty finite mono float32 output at the bundle's 24 kHz rate; PCM16 WAV conversion clips only at the save boundary.
+
++## Request measurement and discovery
++
++The public request contract is available from the package root: `REQUEST_API_VERSION`, `request_api_contract()`, `SynthesisRequest`, `RequestMeasure`, `discover_bundles()`, and `runtime_identity()`. `runtime.measure_request(SynthesisRequest(id="request-1", text="Hello"))` runs the same frontend encoding used by synthesis and reports the exact model-token count, including the export-specific EOT tokens. Measurement is tokenizer-only: it does not require a prepared voice, run ONNX inference, or acquire a model. Current bundles declare no finite text-input maximum, so accepted requests report `maximum=None` and `fits=True`. `max_new_tokens` and the bundle's `default_max_new_tokens` cap generated speech tokens; they are not text-input limits.
++
++`discover_bundles()` normalizes the Chatterbox catalog and annotates profiles already present in the local OnnxVoice inventory. Discovery may refresh catalog metadata when requested, but it does not install models or open ONNX sessions.
++
+ ## Cleanroom and development
+
+ See [docs/cleanroom.md](docs/cleanroom.md) and [docs/architecture.md](docs/architecture.md). Runtime dependencies exclude Chatterbox Python packages, Torch, Torchaudio, and Transformers. Tokenizers are loaded from the installed bundle, never package-global data.
+diff --git a/chatterboxsynth/__init__.py b/chatterboxsynth/__init__.py
+index 3a71718..d5d312a 100644
+--- a/chatterboxsynth/__init__.py
++++ b/chatterboxsynth/__init__.py
+@@ -1,6 +1,8 @@
+ """Cleanroom Chatterbox Nano v2 and Turbo ONNX synthesis API."""
+
++from .api import REQUEST_API_VERSION, request_api_contract, runtime_identity
+ from .config import GenerationConfig
++from .discovery import discover_bundles
+ from .errors import (
+     AudioPromptError,
+     ChatterboxSynthError,
+@@ -8,12 +10,20 @@ from .errors import (
+     IncompatibleVoiceError,
+     InvalidGenerationConfigError,
+     ModelLoadError,
++    ModelNotInstalledError,
+     OptionalDependencyError,
+     RuntimeClosedError,
+     SynthesisError,
+ )
++from .request import RequestMeasure, SynthesisRequest
+ from .runtime import ChatterboxRuntime
+-from .types import AudioPrompt, PreparedVoice, SynthesisResult
++from .types import (
++    AudioPrompt,
++    DiscoveredBundle,
++    PreparedVoice,
++    RequestApiContract,
++    SynthesisResult,
++)
+
+ try:
+     from ._version import __version__
+@@ -25,15 +35,24 @@ __all__ = [
+     "AudioPromptError",
+     "ChatterboxRuntime",
+     "ChatterboxSynthError",
++    "DiscoveredBundle",
++    "discover_bundles",
+     "EmptyTextError",
+     "GenerationConfig",
+     "IncompatibleVoiceError",
+     "InvalidGenerationConfigError",
+     "ModelLoadError",
++    "ModelNotInstalledError",
+     "OptionalDependencyError",
+     "PreparedVoice",
++    "REQUEST_API_VERSION",
++    "RequestApiContract",
++    "RequestMeasure",
+     "RuntimeClosedError",
+     "SynthesisError",
++    "SynthesisRequest",
+     "SynthesisResult",
+     "__version__",
++    "request_api_contract",
++    "runtime_identity",
+ ]
+diff --git a/chatterboxsynth/api.py b/chatterboxsynth/api.py
+new file mode 100644
+index 0000000..03e6a1c
+--- /dev/null
++++ b/chatterboxsynth/api.py
+@@ -0,0 +1,38 @@
++from __future__ import annotations
++
++from importlib.metadata import PackageNotFoundError, version
++from typing import Any
++
++from .types import RequestApiContract
++
++try:
++    from ._version import __version__ as _engine_version
++except ImportError:  # setuptools_scm generates this file during package builds
++    _engine_version = "0.0.0"
++
++REQUEST_API_VERSION = 1
++
++
++def request_api_contract() -> RequestApiContract:
++    """Return ChatterboxSynth's stable public request API capabilities."""
++    return RequestApiContract(
++        version=REQUEST_API_VERSION,
++        supports_reference_voice=True,
++        supports_named_voices=False,
++        supports_request_measurement=True,
++    )
++
++
++def runtime_identity() -> dict[str, Any]:
++    """Return stable package/backend identity fields for cache manifests."""
++    try:
++        onnxvoice_version = version("onnxvoice")
++    except PackageNotFoundError:
++        onnxvoice_version = "unknown"
++    return {
++        "engine": "chatterboxsynth",
++        "engine_version": _engine_version,
++        "backend": "onnxvoice",
++        "onnxvoice_version": onnxvoice_version,
++        "request_api_version": REQUEST_API_VERSION,
++    }
+diff --git a/chatterboxsynth/discovery.py b/chatterboxsynth/discovery.py
+new file mode 100644
+index 0000000..639e8af
+--- /dev/null
++++ b/chatterboxsynth/discovery.py
+@@ -0,0 +1,113 @@
++from __future__ import annotations
++
++from collections.abc import Mapping, Sequence
++from pathlib import Path
++from typing import Any
++
++from ._onnxvoice import onnxvoice_module
++from .errors import ModelLoadError
++from .runtime import _source_revision
++from .types import DiscoveredBundle
++
++_BUNDLE_PROFILES = {
++    "nano-v2": ("cpu", "fp32"),
++    "turbo": ("fp32", "q4f16"),
++}
++_DISPLAY_NAMES = {"nano-v2": "Chatterbox Nano v2", "turbo": "Chatterbox Turbo"}
++
++
++def _languages(metadata: Mapping[str, Any]) -> tuple[str, ...]:
++    value = metadata.get("languages", metadata.get("language", "en"))
++    values: tuple[str, ...]
++    if isinstance(value, str):
++        values = (value,)
++    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
++        values = tuple(item for item in value if isinstance(item, str))
++    else:
++        values = ()
++    return tuple(sorted({language.lower() for language in values}))
++
++
++def _installed_profiles(installations: Sequence[Any], bundle_id: str) -> set[str]:
++    found: set[str] = set()
++    for installation in installations:
++        if getattr(installation, "system", "chatterbox") != "chatterbox":
++            continue
++        if getattr(installation, "id", None) != bundle_id:
++            continue
++        metadata = getattr(installation, "metadata", None)
++        if not isinstance(metadata, Mapping):
++            continue
++        runtime = metadata.get("runtime")
++        profile = metadata.get("selected_quality") or metadata.get("quality")
++        if not isinstance(profile, str) and isinstance(runtime, Mapping):
++            profile = runtime.get("profile")
++        if isinstance(profile, str) and profile in _BUNDLE_PROFILES[bundle_id]:
++            found.add(profile)
++    return found
++
++
++def discover_bundles(
++    *,
++    cache_dir: str | Path | None = None,
++    offline: bool = False,
++    refresh: bool = False,
++    catalog_sources: dict[str, str] | None = None,
++) -> tuple[DiscoveredBundle, ...]:
++    """Discover normalized Chatterbox catalog bundles and locally installed profiles."""
++    module = onnxvoice_module()
++    manager = module.OnnxVoice(
++        cache_dir=cache_dir,
++        offline=offline,
++        catalog_sources=catalog_sources,
++    )
++    catalog_items = manager.list("chatterbox", refresh=refresh)
++    installations = manager.list("chatterbox", installed=True)
++    by_id: dict[str, Any] = {}
++    for item in catalog_items:
++        bundle_id = getattr(item, "id", None)
++        if bundle_id in _BUNDLE_PROFILES:
++            by_id[bundle_id] = item
++
++    bundles: list[DiscoveredBundle] = []
++    for bundle_id in sorted(by_id):
++        item = by_id[bundle_id]
++        metadata = getattr(item, "metadata", None)
++        if not isinstance(metadata, Mapping):
++            raise ModelLoadError(f"Catalog bundle {bundle_id!r} has no normalized metadata")
++        raw_profiles = metadata.get("profiles")
++        if not isinstance(raw_profiles, Mapping):
++            raise ModelLoadError(f"Catalog bundle {bundle_id!r} has no normalized profiles")
++        profiles = tuple(
++            profile for profile in _BUNDLE_PROFILES[bundle_id] if profile in raw_profiles
++        )
++        default_profile = metadata.get("default_profile")
++        if not profiles or not isinstance(default_profile, str) or default_profile not in profiles:
++            raise ModelLoadError(f"Catalog bundle {bundle_id!r} has invalid profile metadata")
++        sample_rate = getattr(item, "sample_rate", None)
++        if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
++            raise ModelLoadError(f"Catalog bundle {bundle_id!r} has an invalid sample rate")
++        installed = _installed_profiles(installations, bundle_id)
++        source = metadata.get("source")
++        repository = source.get("repository") if isinstance(source, Mapping) else None
++        runtime = metadata.get("runtime")
++        bundles.append(
++            DiscoveredBundle(
++                id=bundle_id,
++                ref=f"chatterbox:{bundle_id}",
++                display_name=_DISPLAY_NAMES[bundle_id],
++                aliases=tuple(sorted(getattr(item, "aliases", ()), key=str.casefold)),
++                languages=_languages(metadata),
++                profiles=profiles,
++                default_profile=default_profile,
++                sample_rate=sample_rate,
++                source_revision=_source_revision(metadata),
++                runtime_available=bool(installed),
++                installed_profiles=tuple(profile for profile in profiles if profile in installed),
++                metadata={
++                    "source_repository": repository,
++                    "runtime": dict(runtime) if isinstance(runtime, Mapping) else {},
++                },
++            )
++        )
++    return tuple(bundles)
+diff --git a/chatterboxsynth/errors.py b/chatterboxsynth/errors.py
+index 6def6fc..488f845 100644
+--- a/chatterboxsynth/errors.py
++++ b/chatterboxsynth/errors.py
+@@ -10,6 +10,10 @@ class ModelLoadError(ChatterboxSynthError):
+     """A model installation or local bundle could not be opened."""
+
+
++class ModelNotInstalledError(ModelLoadError):
++    """A requested managed model/profile is not installed locally."""
++
++
+ class AudioPromptError(ChatterboxSynthError, ValueError):
+     """Reference audio does not satisfy the input contract."""
+
+diff --git a/chatterboxsynth/request.py b/chatterboxsynth/request.py
+new file mode 100644
+index 0000000..ea2bdea
+--- /dev/null
++++ b/chatterboxsynth/request.py
+@@ -0,0 +1,63 @@
++from __future__ import annotations
++
++import re
++from collections.abc import Mapping
++from dataclasses import dataclass, field
++from types import MappingProxyType
++from typing import Any, Literal
++
++_ENGLISH_LANGUAGE_RE = re.compile(r"^en(?:-[a-z]{2})?$", re.IGNORECASE)
++
++
++def _validate_request_language(language: str) -> str:
++    if not isinstance(language, str):
++        raise TypeError("language must be a string")
++    normalized = language.strip()
++    if not _ENGLISH_LANGUAGE_RE.fullmatch(normalized):
++        raise ValueError("ChatterboxSynth currently supports English language requests only")
++    if "-" not in normalized:
++        return "en"
++    base, region = normalized.split("-", 1)
++    return f"{base.lower()}-{region.upper()}"
++
++
++@dataclass(frozen=True, slots=True)
++class SynthesisRequest:
++    """Language-tagged text request for orchestration and request measurement."""
++
++    id: str
++    text: str
++    language: str = "en"
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.id, str) or not self.id.strip():
++            raise ValueError("id must be a non-empty string")
++        if not isinstance(self.text, str):
++            raise TypeError("text must be a string")
++        object.__setattr__(self, "language", _validate_request_language(self.language))
++
++
++@dataclass(frozen=True, slots=True)
++class RequestMeasure:
++    """Exact tokenizer-level request size reported by ChatterboxSynth."""
++
++    fits: bool
++    amount: int
++    maximum: int | None
++    unit: Literal["model_tokens"] = "model_tokens"
++    details: Mapping[str, Any] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.fits, bool):
++            raise TypeError("fits must be a boolean")
++        if isinstance(self.amount, bool) or not isinstance(self.amount, int) or self.amount < 0:
++            raise ValueError("amount must be a non-negative integer")
++        if self.maximum is not None and (
++            isinstance(self.maximum, bool) or not isinstance(self.maximum, int) or self.maximum < 0
++        ):
++            raise ValueError("maximum must be a non-negative integer or None")
++        if self.unit != "model_tokens":
++            raise ValueError("unit must be 'model_tokens'")
++        if not isinstance(self.details, Mapping):
++            raise TypeError("details must be a mapping")
++        object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+diff --git a/chatterboxsynth/runtime.py b/chatterboxsynth/runtime.py
+index c6a3b9f..e63f97a 100644
+--- a/chatterboxsynth/runtime.py
++++ b/chatterboxsynth/runtime.py
+@@ -14,10 +14,12 @@ from .config import GenerationConfig
+ from .errors import (
+     IncompatibleVoiceError,
+     ModelLoadError,
++    ModelNotInstalledError,
+     RuntimeClosedError,
+     SynthesisError,
+ )
+ from .frontend import ChatterboxFrontend
++from .request import RequestMeasure, SynthesisRequest, _validate_request_language
+ from .types import AudioPrompt, PreparedVoice, SynthesisResult
+
+ _SAMPLE_RATE = 24_000
+@@ -293,6 +295,60 @@ class ChatterboxRuntime:
+                 close()
+             raise
+
++    @classmethod
++    def from_installed(
++        cls,
++        model: str,
++        *,
++        quality: str | None = None,
++        provider: str | Sequence[str] | None = "cpu",
++        provider_options: Any | None = None,
++        session_options: Any | None = None,
++        cache_dir: str | Path | None = None,
++    ) -> ChatterboxRuntime:
++        """Open an existing managed installation without catalog or network access."""
++        ref, bundle_id = normalize_model_ref(model)
++        if quality is not None and quality not in _PROFILES[bundle_id]:
++            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
++        module = onnxvoice_module()
++        manager = module.OnnxVoice(cache_dir=cache_dir)
++        try:
++            installation = manager.resolve(ref, quality=quality)
++        except Exception as exc:
++            not_installed_error = getattr(module, "NotInstalledError", ())
++            if isinstance(not_installed_error, type) and isinstance(exc, not_installed_error):
++                raise ModelNotInstalledError(
++                    f"Chatterbox model {ref!r} with quality={quality!r} is not installed"
++                ) from exc
++            raise
++        adapter = manager.open(
++            installation,
++            providers=normalize_providers(provider),
++            provider_options=provider_options,
++            session_options=session_options,
++        )
++        try:
++            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
++                installation
++            )
++            tokenizer_path = installation.artifact("tokenizer").path
++            frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
++            return cls(
++                adapter,
++                frontend,
++                model=model_id,
++                profile=profile,
++                source_revision=revision,
++                runtime_metadata=runtime,
++                sample_rate=rate,
++                owns_adapter=True,
++            )
++        except BaseException:
++            close = getattr(adapter, "close", None)
++            if callable(close):
++                close()
++            raise
++
+     @classmethod
+     def load(
+         cls,
+@@ -468,6 +524,29 @@ class ChatterboxRuntime:
+                 "PreparedVoice belongs to an incompatible Chatterbox model, profile, or source revision"
+             )
+
++    def _encode_text(self, text: str) -> tuple[int, ...]:
++        """Encode user text through the exact tokenizer path shared with measurement."""
++        return self._frontend.encode(text)
++
++    def _request_capacity(self) -> int | None:
++        """Return a published text-input token cap; current bundles declare none."""
++        return None
++
++    def measure_request(self, request: SynthesisRequest) -> RequestMeasure:
++        """Measure exact model input tokens without preparing a voice or running inference."""
++        self._ensure_open()
++        if not isinstance(request, SynthesisRequest):
++            raise TypeError("request must be a SynthesisRequest")
++        _validate_request_language(request.language)
++        token_ids = self._encode_text(request.text)
++        maximum = self._request_capacity()
++        return RequestMeasure(
++            fits=maximum is None or len(token_ids) <= maximum,
++            amount=len(token_ids),
++            maximum=maximum,
++            details={"model": self.model, "profile": self.profile},
++        )
++
+     def synthesize(
+         self,
+         text: str,
+@@ -482,7 +561,7 @@ class ChatterboxRuntime:
+         self._validate_voice(voice)
+         if config is not None and not isinstance(config, GenerationConfig):
+             raise TypeError("config must be GenerationConfig or None")
+-        token_ids = self._frontend.encode(text)
++        token_ids = self._encode_text(text)
+         max_new_tokens = (
+             config.max_new_tokens
+             if config and config.max_new_tokens is not None
+diff --git a/chatterboxsynth/types.py b/chatterboxsynth/types.py
+index feb8c62..08a76c3 100644
+--- a/chatterboxsynth/types.py
++++ b/chatterboxsynth/types.py
+@@ -1,8 +1,10 @@
+ from __future__ import annotations
+
++from collections.abc import Mapping
+ from dataclasses import dataclass, field
+ from io import BufferedIOBase
+ from pathlib import Path
++from types import MappingProxyType
+ from typing import Any, BinaryIO
+
+ import numpy as np
+@@ -119,3 +121,40 @@ class SynthesisResult:
+             return path
+         write_wav(target, self.audio, self.sample_rate)
+         return target
++
++
++@dataclass(frozen=True, slots=True)
++class RequestApiContract:
++    """Versioned capabilities exposed by ChatterboxSynth's request API."""
++
++    version: int
++    supports_reference_voice: bool
++    supports_named_voices: bool
++    supports_request_measurement: bool
++
++
++@dataclass(frozen=True, slots=True)
++class DiscoveredBundle:
++    """Normalized public catalog and installed-state information for a bundle."""
++
++    id: str
++    ref: str
++    display_name: str
++    aliases: tuple[str, ...]
++    languages: tuple[str, ...]
++    profiles: tuple[str, ...]
++    default_profile: str
++    sample_rate: int
++    source_revision: str
++    runtime_available: bool
++    installed_profiles: tuple[str, ...] = ()
++    metadata: Mapping[str, Any] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        for name in ("aliases", "languages", "profiles", "installed_profiles"):
++            value = getattr(self, name)
++            if not isinstance(value, tuple) or any(not isinstance(item, str) for item in value):
++                raise TypeError(f"{name} must be a tuple of strings")
++        if not isinstance(self.metadata, Mapping):
++            raise TypeError("metadata must be a mapping")
++        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 4935e2e..55e7549 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -8,4 +8,6 @@ ChatterboxSynth is a thin user-facing synthesis layer over OnnxVoice.
+
+ `ChatterboxRuntime.from_pretrained()` delegates model lookup and installation to OnnxVoice. `ChatterboxRuntime.load()` reads an OnnxVoice installation manifest and opens its files with `OnnxVoice.open_local`; it does not query a catalog or access the network. Neither path duplicates a downloader, asset cache, session factory, graph loop, or decoder.
+
++The request boundary is owned by ChatterboxSynth: `measure_request()` counts the exact model token IDs from its export-specific frontend, including EOT handling, without reference preparation or inference. Current bundles declare no finite input-token maximum; `default_max_new_tokens` is solely an output-generation cap. `discover_bundles()` combines normalized pinned catalog metadata with local installed-profile inventory and never opens sessions or installs assets. The bundle catalog owns source revisions and profile metadata, while OnnxVoice owns catalog access, local installation resolution, and graph execution. No VoiceRender concepts or dependencies belong in this package.
++
+ The initial API supports English Nano v2 (`cpu`, `fp32`) and Turbo (`fp32`, `q4f16`) only. Synthesis is greedy and single-request: no random sampling, sentence splitting, chunk stitching, watermark, or persistent voice cache is added.
+diff --git a/tests/test_api.py b/tests/test_api.py
+new file mode 100644
+index 0000000..8e8fe58
+--- /dev/null
++++ b/tests/test_api.py
+@@ -0,0 +1,54 @@
++from __future__ import annotations
++
++from dataclasses import FrozenInstanceError
++
++import pytest
++
++import chatterboxsynth as cs
++
++
++def test_request_api_contract_and_package_exports() -> None:
++    assert cs.REQUEST_API_VERSION == 1
++    contract = cs.request_api_contract()
++    assert isinstance(contract, cs.RequestApiContract)
++    assert contract.version == 1
++    assert contract.supports_reference_voice is True
++    assert contract.supports_named_voices is False
++    assert contract.supports_request_measurement is True
++    assert cs.SynthesisRequest is not None
++    assert cs.RequestMeasure is not None
++    assert cs.DiscoveredBundle is not None
++    assert callable(cs.runtime_identity)
++
++
++def test_synthesis_request_normalizes_english_and_is_immutable() -> None:
++    request = cs.SynthesisRequest(id="request-1", text="Hello", language="en-us")
++    assert request.language == "en-US"
++    with pytest.raises(FrozenInstanceError):
++        request.text = "changed"  # type: ignore[misc]
++
++    with pytest.raises(ValueError, match="English"):
++        cs.SynthesisRequest(id="request-2", text="Hola", language="es")
++    with pytest.raises(ValueError, match="non-empty"):
++        cs.SynthesisRequest(id=" ", text="Hello")
++    with pytest.raises(TypeError, match="text must be a string"):
++        cs.SynthesisRequest(id="request-3", text=1)  # type: ignore[arg-type]
++
++
++def test_request_measure_copies_details_into_an_immutable_mapping() -> None:
++    details = {"model": "nano-v2"}
++    measure = cs.RequestMeasure(True, 2, None, details=details)
++    details["model"] = "turbo"
++    assert measure.details == {"model": "nano-v2"}
++    with pytest.raises(TypeError):
++        measure.details["model"] = "turbo"  # type: ignore[index]
++
++
++def test_runtime_identity_has_stable_environment_independent_fields() -> None:
++    identity = cs.runtime_identity()
++    assert identity["engine"] == "chatterboxsynth"
++    assert identity["engine_version"] == cs.__version__
++    assert identity["backend"] == "onnxvoice"
++    assert identity["onnxvoice_version"]
++    assert identity["request_api_version"] == 1
++    assert not any("path" in key or "url" in key for key in identity)
+diff --git a/tests/test_discovery.py b/tests/test_discovery.py
+new file mode 100644
+index 0000000..8c02ea0
+--- /dev/null
++++ b/tests/test_discovery.py
+@@ -0,0 +1,142 @@
++from __future__ import annotations
++
++from pathlib import Path
++from types import SimpleNamespace
++from typing import Any
++
++import chatterboxsynth.discovery as discovery_module
++from chatterboxsynth import DiscoveredBundle, discover_bundles
++
++NANO_REVISION = "851210533a5bcb4ad78e3ada6d527482dd1a31e7"
++TURBO_REVISION = "d21799bd0354adb85e348b8a0442a8405110a2cf"
++
++
++def catalog_item(
++    bundle_id: str,
++    *,
++    aliases: tuple[str, ...],
++    profiles: tuple[str, ...],
++    default_profile: str,
++    revision: str,
++) -> Any:
++    profile_data = {profile: {} for profile in profiles}
++    return SimpleNamespace(
++        id=bundle_id,
++        sample_rate=24_000,
++        aliases=aliases,
++        metadata={
++            "language": "en",
++            "profiles": profile_data,
++            "default_profile": default_profile,
++            "source_revision": revision,
++            "source": {"revision": revision, "requested_revision": "main", "repository": bundle_id},
++            "runtime": {"default_max_new_tokens": 1024},
++        },
++    )
++
++
++def test_discovery_normalizes_catalog_and_installed_profiles_without_runtime_sessions(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    nano = catalog_item(
++        "nano-v2",
++        aliases=("nano-110m", "nano"),
++        profiles=("fp32", "cpu"),
++        default_profile="cpu",
++        revision=NANO_REVISION,
++    )
++    turbo = catalog_item(
++        "turbo",
++        aliases=("turbo-350m",),
++        profiles=("q4f16", "fp32"),
++        default_profile="fp32",
++        revision=TURBO_REVISION,
++    )
++    installations = [
++        SimpleNamespace(id="nano-v2", system="chatterbox", metadata={"selected_quality": "cpu"}),
++        SimpleNamespace(
++            id="turbo", system="chatterbox", metadata={"runtime": {"profile": "q4f16"}}
++        ),
++        SimpleNamespace(
++            id="nano-v2", system="chatterbox", metadata={"selected_quality": "invalid"}
++        ),
++    ]
++    calls: dict[str, Any] = {"list": []}
++
++    class Manager:
++        def __init__(self, **kwargs: Any) -> None:
++            calls["manager"] = kwargs
++
++        def list(self, system: str, *, installed: bool = False, refresh: bool = False) -> Any:
++            calls["list"].append((system, installed, refresh))
++            return installations if installed else [turbo, nano]
++
++        def install(self, *_: Any, **__: Any) -> None:
++            raise AssertionError("discovery must not install models")
++
++        def open(self, *_: Any, **__: Any) -> None:
++            raise AssertionError("discovery must not open runtime sessions")
++
++    monkeypatch.setattr(
++        discovery_module, "onnxvoice_module", lambda: SimpleNamespace(OnnxVoice=Manager)
++    )
++    sources = {"chatterbox": str(tmp_path / "catalog.json")}
++
++    bundles = discover_bundles(
++        cache_dir=tmp_path / "cache",
++        offline=True,
++        refresh=True,
++        catalog_sources=sources,
++    )
++
++    assert all(isinstance(bundle, DiscoveredBundle) for bundle in bundles)
++    assert [bundle.id for bundle in bundles] == ["nano-v2", "turbo"]
++    nano_result, turbo_result = bundles
++    assert nano_result.ref == "chatterbox:nano-v2"
++    assert nano_result.display_name == "Chatterbox Nano v2"
++    assert nano_result.aliases == ("nano", "nano-110m")
++    assert nano_result.languages == ("en",)
++    assert nano_result.profiles == ("cpu", "fp32")
++    assert nano_result.default_profile == "cpu"
++    assert nano_result.sample_rate == 24_000
++    assert nano_result.source_revision == NANO_REVISION
++    assert nano_result.runtime_available is True
++    assert nano_result.installed_profiles == ("cpu",)
++    assert turbo_result.aliases == ("turbo-350m",)
++    assert turbo_result.languages == ("en",)
++    assert turbo_result.profiles == ("fp32", "q4f16")
++    assert turbo_result.default_profile == "fp32"
++    assert turbo_result.source_revision == TURBO_REVISION
++    assert turbo_result.runtime_available is True
++    assert turbo_result.installed_profiles == ("q4f16",)
++    assert calls["manager"] == {
++        "cache_dir": tmp_path / "cache",
++        "offline": True,
++        "catalog_sources": sources,
++    }
++    assert calls["list"] == [("chatterbox", False, True), ("chatterbox", True, False)]
++
++
++def test_discovery_reports_no_runtime_when_no_profile_is_installed(monkeypatch: Any) -> None:
++    item = catalog_item(
++        "nano-v2",
++        aliases=("nano", "nano-110m"),
++        profiles=("cpu", "fp32"),
++        default_profile="cpu",
++        revision=NANO_REVISION,
++    )
++
++    class Manager:
++        def __init__(self, **_: Any) -> None:
++            pass
++
++        def list(self, _system: str, *, installed: bool = False, refresh: bool = False) -> Any:
++            return [] if installed else [item]
++
++    monkeypatch.setattr(
++        discovery_module, "onnxvoice_module", lambda: SimpleNamespace(OnnxVoice=Manager)
++    )
++    result = discover_bundles()
++    assert len(result) == 1
++    assert result[0].runtime_available is False
++    assert result[0].installed_profiles == ()
+diff --git a/tests/test_runtime.py b/tests/test_runtime.py
+index 4462783..1a81057 100644
+--- a/tests/test_runtime.py
++++ b/tests/test_runtime.py
+@@ -10,8 +10,20 @@ import numpy as np
+ import pytest
+
+ import chatterboxsynth.runtime as runtime_module
+-from chatterboxsynth import AudioPrompt, ChatterboxRuntime, GenerationConfig
+-from chatterboxsynth.errors import IncompatibleVoiceError, ModelLoadError, RuntimeClosedError
++from chatterboxsynth import (
++    AudioPrompt,
++    ChatterboxRuntime,
++    GenerationConfig,
++    ModelNotInstalledError,
++    SynthesisRequest,
++)
++from chatterboxsynth.errors import (
++    EmptyTextError,
++    IncompatibleVoiceError,
++    ModelLoadError,
++    RuntimeClosedError,
++)
++from chatterboxsynth.frontend import ChatterboxFrontend
+
+ REVISION = "851210533a5bcb4ad78e3ada6d527482dd1a31e7"
+
+@@ -21,6 +33,8 @@ class FakeFrontend:
+         pass
+
+     def encode(self, text: str) -> tuple[int, ...]:
++        if not text.strip():
++            raise EmptyTextError("text must contain non-whitespace characters")
+         return (7, 8)
+
+
+@@ -62,6 +76,194 @@ def make_runtime(
+     return runtime, adapter
+
+
++class FakeNotInstalledError(Exception):
++    pass
++
++
++def make_managed_installation(tmp_path: Path, *, profile: str = "cpu") -> Any:
++    metadata = {
++        "selected_quality": profile,
++        "source_revision": REVISION,
++        "runtime": {
++            "profile": profile,
++            "default_max_new_tokens": 12,
++            "default_repetition_penalty": 1.1,
++        },
++        "frontend": {"tokenizer_contract": "nano-v2"},
++    }
++    return SimpleNamespace(
++        id="nano-v2",
++        system="chatterbox",
++        sample_rate=24_000,
++        metadata=metadata,
++        artifact=lambda role: SimpleNamespace(path=tmp_path / f"{role}.json"),
++    )
++
++
++def patch_managed_manager(
++    monkeypatch: Any,
++    installation: Any,
++    adapter: FakeAdapter,
++    calls: dict[str, Any],
++    *,
++    missing: bool = False,
++) -> None:
++    class Manager:
++        def __init__(self, **kwargs: Any) -> None:
++            calls["manager"] = kwargs
++
++        def resolve(self, ref: str, **kwargs: Any) -> Any:
++            calls["resolve"] = (ref, kwargs)
++            if missing:
++                raise FakeNotInstalledError("missing")
++            return installation
++
++        def open(self, selected: Any, **kwargs: Any) -> FakeAdapter:
++            calls["open"] = (selected, kwargs)
++            return adapter
++
++        def install(self, *_: Any, **__: Any) -> None:
++            raise AssertionError("from_installed() must not install")
++
++        def list(self, *_: Any, **__: Any) -> None:
++            raise AssertionError("from_installed() must not query the catalog")
++
++    monkeypatch.setattr(
++        runtime_module,
++        "onnxvoice_module",
++        lambda: SimpleNamespace(OnnxVoice=Manager, NotInstalledError=FakeNotInstalledError),
++    )
++    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", FakeFrontend)
++
++
++def test_from_installed_resolves_and_opens_local_model_without_acquisition(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    installation = make_managed_installation(tmp_path)
++    adapter = FakeAdapter()
++    calls: dict[str, Any] = {}
++    patch_managed_manager(monkeypatch, installation, adapter, calls)
++    provider_options = {"CPUExecutionProvider": {"arena_extend_strategy": "kSameAsRequested"}}
++    session_options = object()
++
++    runtime = ChatterboxRuntime.from_installed(
++        "nano",
++        quality="cpu",
++        provider="cpu",
++        provider_options=provider_options,
++        session_options=session_options,
++        cache_dir=tmp_path / "cache",
++    )
++
++    assert calls["manager"] == {"cache_dir": tmp_path / "cache"}
++    assert calls["resolve"] == ("chatterbox:nano-v2", {"quality": "cpu"})
++    selected, open_options = calls["open"]
++    assert selected is installation
++    assert open_options["providers"] == "CPUExecutionProvider"
++    assert open_options["provider_options"] is provider_options
++    assert open_options["session_options"] is session_options
++    assert "install" not in calls and "list" not in calls
++    assert runtime.model == "nano-v2"
++    assert runtime.profile == "cpu"
++    assert runtime.source_revision == REVISION
++    runtime.close()
++    assert adapter.close_calls == 1
++
++
++def test_from_installed_closes_adapter_when_runtime_construction_fails(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    installation = make_managed_installation(tmp_path)
++    adapter = FakeAdapter()
++    calls: dict[str, Any] = {}
++    patch_managed_manager(monkeypatch, installation, adapter, calls)
++
++    def fail_frontend(*_: Any, **__: Any) -> Any:
++        raise RuntimeError("frontend construction failed")
++
++    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", fail_frontend)
++    with pytest.raises(RuntimeError, match="frontend construction failed"):
++        ChatterboxRuntime.from_installed("nano", quality="cpu")
++    assert adapter.close_calls == 1
++
++
++def test_from_installed_raises_stable_error_when_profile_is_absent(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    installation = make_managed_installation(tmp_path)
++    adapter = FakeAdapter()
++    calls: dict[str, Any] = {}
++    patch_managed_manager(monkeypatch, installation, adapter, calls, missing=True)
++
++    with pytest.raises(ModelNotInstalledError, match="not installed"):
++        ChatterboxRuntime.from_installed("nano", quality="cpu")
++    assert "open" not in calls
++
++
++def test_measure_request_is_exact_and_does_not_require_or_prepare_a_voice() -> None:
++    runtime, adapter = make_runtime()
++
++    measure = runtime.measure_request(SynthesisRequest(id="measure-1", text="Hello"))
++
++    assert measure.amount == 2
++    assert measure.maximum is None
++    assert measure.fits is True
++    assert measure.unit == "model_tokens"
++    assert measure.details == {"model": "nano-v2", "profile": "cpu"}
++    assert adapter.prepared == []
++    assert adapter.calls == []
++
++
++@pytest.mark.parametrize(
++    ("model", "profile", "contract", "special_count"),
++    [("nano-v2", "cpu", "nano-v2", 1), ("turbo", "fp32", "turbo", 2)],
++)
++def test_measure_request_includes_export_specific_eot_tokens(
++    model: str, profile: str, contract: str, special_count: int
++) -> None:
++    class Tokenizer:
++        def token_to_id(self, token: str) -> int:
++            assert token == "<|endoftext|>"
++            return 99
++
++        def encode(self, text: str, *, add_special_tokens: bool = True) -> Any:
++            ids = [7, 8]
++            if add_special_tokens:
++                ids.extend([99] * special_count)
++            return SimpleNamespace(ids=ids)
++
++    adapter = FakeAdapter()
++    frontend = ChatterboxFrontend("unused", contract, tokenizer=Tokenizer())
++    runtime = ChatterboxRuntime(
++        adapter,
++        frontend,
++        model=model,
++        profile=profile,
++        source_revision=REVISION,
++        runtime_metadata={"default_max_new_tokens": 11, "default_repetition_penalty": 1.15},
++    )
++
++    measure = runtime.measure_request(SynthesisRequest(id="measure-eot", text="Hello"))
++
++    assert measure.amount == 2 + special_count
++    assert measure.maximum is None
++    assert measure.fits is True
++    assert adapter.prepared == []
++    assert adapter.calls == []
++
++
++def test_empty_text_fails_identically_in_measurement_and_synthesis() -> None:
++    runtime, adapter = make_runtime()
++    voice = runtime.prepare_voice(AudioPrompt(np.zeros(100, dtype=np.float32), 24_000))
++    request = SynthesisRequest(id="empty", text=" \n")
++
++    with pytest.raises(EmptyTextError):
++        runtime.measure_request(request)
++    with pytest.raises(EmptyTextError):
++        runtime.synthesize(request.text, voice=voice)
++    assert adapter.calls == []
++
++
+ def test_prepared_voice_reuse_strict_generation_and_close_ownership() -> None:
+     runtime, adapter = make_runtime(owns_adapter=True)
+     prompt = AudioPrompt(np.full((240, 2), 0.1, dtype=np.float32), 24_000)
