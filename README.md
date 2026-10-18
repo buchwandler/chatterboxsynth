@@ -8,7 +8,9 @@ Cleanroom Python synthesis frontend for the revision-pinned Chatterbox Nano v2 a
 pip install "chatterboxsynth[cpu]"
 ```
 
-The OnnxVoice Chatterbox feature has not yet been publicly released. Until Phase D publishes that feature release, this bootstrap package intentionally has no guessed lower version bound; its dependency is capped at `<0.3`. Pin the lower bound to the actual feature release before publishing ChatterboxSynth. The implementation and tests can use the adjacent OnnxVoice checkout.
+ChatterboxSynth 0.1.x requires a Chatterbox-capable OnnxVoice 0.2.x release.
+Install `chatterboxsynth[cpu]` for the default ONNX Runtime CPU provider or
+`chatterboxsynth[gpu]` for CUDA.
 
 ## Quick start
 
