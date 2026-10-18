@@ -1,0 +1,31 @@
+{
+  "nano-v2": {
+    "repository": "KitsuMate/chatterbox-nano-v2-onnx",
+    "revision": "851210533a5bcb4ad78e3ada6d527482dd1a31e7",
+    "sha256": "f911e1a1742483aff9b11ce39fe2442dd71739121c2e3b78f245563e3db42882",
+    "texts": {
+      "Hello world.": [15496, 995, 13, 50256],
+      "Hello from Chatterbox.": [15496, 422, 609, 1436, 3524, 13, 50256],
+      "I can read numbers like 42 and punctuation, too!": [
+        40, 460, 1100, 3146, 588, 5433, 290, 21025, 2288, 11, 1165, 0, 50256
+      ],
+      "café — naïve": [66, 1878, 2634, 851, 41492, 50256],
+      "Hello [chuckle] there.": [15496, 220, 50274, 612, 13, 50256]
+    }
+  },
+  "turbo": {
+    "repository": "ResembleAI/chatterbox-turbo-ONNX",
+    "revision": "d21799bd0354adb85e348b8a0442a8405110a2cf",
+    "sha256": "3f04e34bea22f9144d1a19151154095bc9ce0430bf421304f5797e716288a906",
+    "texts": {
+      "Hello world.": [15496, 995, 13, 50256, 50256],
+      "Hello from Chatterbox.": [15496, 422, 609, 1436, 3524, 13, 50256, 50256],
+      "I can read numbers like 42 and punctuation, too!": [
+        40, 460, 1100, 3146, 588, 5433, 290, 21025, 2288, 11, 1165, 0, 50256,
+        50256
+      ],
+      "café — naïve": [66, 1878, 2634, 851, 41492, 50256, 50256],
+      "Hello [chuckle] there.": [15496, 220, 50274, 612, 13, 50256, 50256]
+    }
+  }
+}
