@@ -14,10 +14,12 @@ from .config import GenerationConfig
 from .errors import (
     IncompatibleVoiceError,
     ModelLoadError,
+    ModelNotInstalledError,
     RuntimeClosedError,
     SynthesisError,
 )
 from .frontend import ChatterboxFrontend
+from .request import RequestMeasure, SynthesisRequest, _validate_request_language
 from .types import AudioPrompt, PreparedVoice, SynthesisResult
 
 _SAMPLE_RATE = 24_000
@@ -294,6 +296,60 @@ class ChatterboxRuntime:
             raise
 
     @classmethod
+    def from_installed(
+        cls,
+        model: str,
+        *,
+        quality: str | None = None,
+        provider: str | Sequence[str] | None = "cpu",
+        provider_options: Any | None = None,
+        session_options: Any | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> ChatterboxRuntime:
+        """Open an existing managed installation without catalog or network access."""
+        ref, bundle_id = normalize_model_ref(model)
+        if quality is not None and quality not in _PROFILES[bundle_id]:
+            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
+        module = onnxvoice_module()
+        manager = module.OnnxVoice(cache_dir=cache_dir)
+        try:
+            installation = manager.resolve(ref, quality=quality)
+        except Exception as exc:
+            not_installed_error = getattr(module, "NotInstalledError", ())
+            if isinstance(not_installed_error, type) and isinstance(exc, not_installed_error):
+                raise ModelNotInstalledError(
+                    f"Chatterbox model {ref!r} with quality={quality!r} is not installed"
+                ) from exc
+            raise
+        adapter = manager.open(
+            installation,
+            providers=normalize_providers(provider),
+            provider_options=provider_options,
+            session_options=session_options,
+        )
+        try:
+            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
+                installation
+            )
+            tokenizer_path = installation.artifact("tokenizer").path
+            frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
+            return cls(
+                adapter,
+                frontend,
+                model=model_id,
+                profile=profile,
+                source_revision=revision,
+                runtime_metadata=runtime,
+                sample_rate=rate,
+                owns_adapter=True,
+            )
+        except BaseException:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+            raise
+
+    @classmethod
     def load(
         cls,
         path: str | Path,
@@ -468,6 +524,29 @@ class ChatterboxRuntime:
                 "PreparedVoice belongs to an incompatible Chatterbox model, profile, or source revision"
             )
 
+    def _encode_text(self, text: str) -> tuple[int, ...]:
+        """Encode user text through the exact tokenizer path shared with measurement."""
+        return self._frontend.encode(text)
+
+    def _request_capacity(self) -> int | None:
+        """Return a published text-input token cap; current bundles declare none."""
+        return None
+
+    def measure_request(self, request: SynthesisRequest) -> RequestMeasure:
+        """Measure exact model input tokens without preparing a voice or running inference."""
+        self._ensure_open()
+        if not isinstance(request, SynthesisRequest):
+            raise TypeError("request must be a SynthesisRequest")
+        _validate_request_language(request.language)
+        token_ids = self._encode_text(request.text)
+        maximum = self._request_capacity()
+        return RequestMeasure(
+            fits=maximum is None or len(token_ids) <= maximum,
+            amount=len(token_ids),
+            maximum=maximum,
+            details={"model": self.model, "profile": self.profile},
+        )
+
     def synthesize(
         self,
         text: str,
@@ -482,7 +561,7 @@ class ChatterboxRuntime:
         self._validate_voice(voice)
         if config is not None and not isinstance(config, GenerationConfig):
             raise TypeError("config must be GenerationConfig or None")
-        token_ids = self._frontend.encode(text)
+        token_ids = self._encode_text(text)
         max_new_tokens = (
             config.max_new_tokens
             if config and config.max_new_tokens is not None

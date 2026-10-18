@@ -37,6 +37,8 @@ with ChatterboxRuntime.from_pretrained("turbo", quality="fp32") as runtime:
 
 Use `ChatterboxRuntime.load("/path/to/onnxvoice/install")` for an already-installed OnnxVoice bundle. This local path reads the install manifest and verifies artifact sizes and SHA-256 values; it does not query a catalog or access the network.
 
+For render-time opening of a managed model, use `ChatterboxRuntime.from_installed("nano", quality="cpu")`. It resolves and opens only a locally installed profile and never installs a model or refreshes a catalog. By contrast, `from_pretrained()` is the convenience path that may acquire and install a model.
+
 ## CLI
 
 ```bash
@@ -53,6 +55,12 @@ Common options include `--provider cpu|cuda|auto`, `--offline`, `--cache-dir`, `
 `prepare_voice()` accepts an audio filename, `AudioPrompt(samples, sample_rate)`, or a compatible `PreparedVoice`. Stereo audio is deterministically averaged to mono, validated as finite and within `[-1, 1]`, and resampled to 24 kHz with `soxr` HQ. Prepared voice states cannot be reused across incompatible model/profile/source revisions.
 
 Synthesis is deterministic greedy decoding. Empty text is rejected. The MVP does not split long text, stitch chunks, use random sampling, apply PerTh, or persist voice states. `SynthesisResult` validates non-empty finite mono float32 output at the bundle's 24 kHz rate; PCM16 WAV conversion clips only at the save boundary.
+
+## Request measurement and discovery
+
+The public request contract is available from the package root: `REQUEST_API_VERSION`, `request_api_contract()`, `SynthesisRequest`, `RequestMeasure`, `discover_bundles()`, and `runtime_identity()`. `runtime.measure_request(SynthesisRequest(id="request-1", text="Hello"))` runs the same frontend encoding used by synthesis and reports the exact model-token count, including the export-specific EOT tokens. Measurement is tokenizer-only: it does not require a prepared voice, run ONNX inference, or acquire a model. Current bundles declare no finite text-input maximum, so accepted requests report `maximum=None` and `fits=True`. `max_new_tokens` and the bundle's `default_max_new_tokens` cap generated speech tokens; they are not text-input limits.
+
+`discover_bundles()` normalizes the Chatterbox catalog and annotates profiles already present in the local OnnxVoice inventory. Discovery may refresh catalog metadata when requested, but it does not install models or open ONNX sessions.
 
 ## Cleanroom and development
 

@@ -10,8 +10,20 @@ import numpy as np
 import pytest
 
 import chatterboxsynth.runtime as runtime_module
-from chatterboxsynth import AudioPrompt, ChatterboxRuntime, GenerationConfig
-from chatterboxsynth.errors import IncompatibleVoiceError, ModelLoadError, RuntimeClosedError
+from chatterboxsynth import (
+    AudioPrompt,
+    ChatterboxRuntime,
+    GenerationConfig,
+    ModelNotInstalledError,
+    SynthesisRequest,
+)
+from chatterboxsynth.errors import (
+    EmptyTextError,
+    IncompatibleVoiceError,
+    ModelLoadError,
+    RuntimeClosedError,
+)
+from chatterboxsynth.frontend import ChatterboxFrontend
 
 REVISION = "851210533a5bcb4ad78e3ada6d527482dd1a31e7"
 
@@ -21,6 +33,8 @@ class FakeFrontend:
         pass
 
     def encode(self, text: str) -> tuple[int, ...]:
+        if not text.strip():
+            raise EmptyTextError("text must contain non-whitespace characters")
         return (7, 8)
 
 
@@ -60,6 +74,194 @@ def make_runtime(
         owns_adapter=owns_adapter,
     )
     return runtime, adapter
+
+
+class FakeNotInstalledError(Exception):
+    pass
+
+
+def make_managed_installation(tmp_path: Path, *, profile: str = "cpu") -> Any:
+    metadata = {
+        "selected_quality": profile,
+        "source_revision": REVISION,
+        "runtime": {
+            "profile": profile,
+            "default_max_new_tokens": 12,
+            "default_repetition_penalty": 1.1,
+        },
+        "frontend": {"tokenizer_contract": "nano-v2"},
+    }
+    return SimpleNamespace(
+        id="nano-v2",
+        system="chatterbox",
+        sample_rate=24_000,
+        metadata=metadata,
+        artifact=lambda role: SimpleNamespace(path=tmp_path / f"{role}.json"),
+    )
+
+
+def patch_managed_manager(
+    monkeypatch: Any,
+    installation: Any,
+    adapter: FakeAdapter,
+    calls: dict[str, Any],
+    *,
+    missing: bool = False,
+) -> None:
+    class Manager:
+        def __init__(self, **kwargs: Any) -> None:
+            calls["manager"] = kwargs
+
+        def resolve(self, ref: str, **kwargs: Any) -> Any:
+            calls["resolve"] = (ref, kwargs)
+            if missing:
+                raise FakeNotInstalledError("missing")
+            return installation
+
+        def open(self, selected: Any, **kwargs: Any) -> FakeAdapter:
+            calls["open"] = (selected, kwargs)
+            return adapter
+
+        def install(self, *_: Any, **__: Any) -> None:
+            raise AssertionError("from_installed() must not install")
+
+        def list(self, *_: Any, **__: Any) -> None:
+            raise AssertionError("from_installed() must not query the catalog")
+
+    monkeypatch.setattr(
+        runtime_module,
+        "onnxvoice_module",
+        lambda: SimpleNamespace(OnnxVoice=Manager, NotInstalledError=FakeNotInstalledError),
+    )
+    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", FakeFrontend)
+
+
+def test_from_installed_resolves_and_opens_local_model_without_acquisition(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    installation = make_managed_installation(tmp_path)
+    adapter = FakeAdapter()
+    calls: dict[str, Any] = {}
+    patch_managed_manager(monkeypatch, installation, adapter, calls)
+    provider_options = {"CPUExecutionProvider": {"arena_extend_strategy": "kSameAsRequested"}}
+    session_options = object()
+
+    runtime = ChatterboxRuntime.from_installed(
+        "nano",
+        quality="cpu",
+        provider="cpu",
+        provider_options=provider_options,
+        session_options=session_options,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert calls["manager"] == {"cache_dir": tmp_path / "cache"}
+    assert calls["resolve"] == ("chatterbox:nano-v2", {"quality": "cpu"})
+    selected, open_options = calls["open"]
+    assert selected is installation
+    assert open_options["providers"] == "CPUExecutionProvider"
+    assert open_options["provider_options"] is provider_options
+    assert open_options["session_options"] is session_options
+    assert "install" not in calls and "list" not in calls
+    assert runtime.model == "nano-v2"
+    assert runtime.profile == "cpu"
+    assert runtime.source_revision == REVISION
+    runtime.close()
+    assert adapter.close_calls == 1
+
+
+def test_from_installed_closes_adapter_when_runtime_construction_fails(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    installation = make_managed_installation(tmp_path)
+    adapter = FakeAdapter()
+    calls: dict[str, Any] = {}
+    patch_managed_manager(monkeypatch, installation, adapter, calls)
+
+    def fail_frontend(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("frontend construction failed")
+
+    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", fail_frontend)
+    with pytest.raises(RuntimeError, match="frontend construction failed"):
+        ChatterboxRuntime.from_installed("nano", quality="cpu")
+    assert adapter.close_calls == 1
+
+
+def test_from_installed_raises_stable_error_when_profile_is_absent(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    installation = make_managed_installation(tmp_path)
+    adapter = FakeAdapter()
+    calls: dict[str, Any] = {}
+    patch_managed_manager(monkeypatch, installation, adapter, calls, missing=True)
+
+    with pytest.raises(ModelNotInstalledError, match="not installed"):
+        ChatterboxRuntime.from_installed("nano", quality="cpu")
+    assert "open" not in calls
+
+
+def test_measure_request_is_exact_and_does_not_require_or_prepare_a_voice() -> None:
+    runtime, adapter = make_runtime()
+
+    measure = runtime.measure_request(SynthesisRequest(id="measure-1", text="Hello"))
+
+    assert measure.amount == 2
+    assert measure.maximum is None
+    assert measure.fits is True
+    assert measure.unit == "model_tokens"
+    assert measure.details == {"model": "nano-v2", "profile": "cpu"}
+    assert adapter.prepared == []
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    ("model", "profile", "contract", "special_count"),
+    [("nano-v2", "cpu", "nano-v2", 1), ("turbo", "fp32", "turbo", 2)],
+)
+def test_measure_request_includes_export_specific_eot_tokens(
+    model: str, profile: str, contract: str, special_count: int
+) -> None:
+    class Tokenizer:
+        def token_to_id(self, token: str) -> int:
+            assert token == "<|endoftext|>"
+            return 99
+
+        def encode(self, text: str, *, add_special_tokens: bool = True) -> Any:
+            ids = [7, 8]
+            if add_special_tokens:
+                ids.extend([99] * special_count)
+            return SimpleNamespace(ids=ids)
+
+    adapter = FakeAdapter()
+    frontend = ChatterboxFrontend("unused", contract, tokenizer=Tokenizer())
+    runtime = ChatterboxRuntime(
+        adapter,
+        frontend,
+        model=model,
+        profile=profile,
+        source_revision=REVISION,
+        runtime_metadata={"default_max_new_tokens": 11, "default_repetition_penalty": 1.15},
+    )
+
+    measure = runtime.measure_request(SynthesisRequest(id="measure-eot", text="Hello"))
+
+    assert measure.amount == 2 + special_count
+    assert measure.maximum is None
+    assert measure.fits is True
+    assert adapter.prepared == []
+    assert adapter.calls == []
+
+
+def test_empty_text_fails_identically_in_measurement_and_synthesis() -> None:
+    runtime, adapter = make_runtime()
+    voice = runtime.prepare_voice(AudioPrompt(np.zeros(100, dtype=np.float32), 24_000))
+    request = SynthesisRequest(id="empty", text=" \n")
+
+    with pytest.raises(EmptyTextError):
+        runtime.measure_request(request)
+    with pytest.raises(EmptyTextError):
+        runtime.synthesize(request.text, voice=voice)
+    assert adapter.calls == []
 
 
 def test_prepared_voice_reuse_strict_generation_and_close_ownership() -> None:

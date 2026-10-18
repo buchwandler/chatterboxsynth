@@ -10,6 +10,10 @@ class ModelLoadError(ChatterboxSynthError):
     """A model installation or local bundle could not be opened."""
 
 
+class ModelNotInstalledError(ModelLoadError):
+    """A requested managed model/profile is not installed locally."""
+
+
 class AudioPromptError(ChatterboxSynthError, ValueError):
     """Reference audio does not satisfy the input contract."""
 

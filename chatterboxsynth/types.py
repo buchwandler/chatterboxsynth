@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BufferedIOBase
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, BinaryIO
 
 import numpy as np
@@ -119,3 +121,40 @@ class SynthesisResult:
             return path
         write_wav(target, self.audio, self.sample_rate)
         return target
+
+
+@dataclass(frozen=True, slots=True)
+class RequestApiContract:
+    """Versioned capabilities exposed by ChatterboxSynth's request API."""
+
+    version: int
+    supports_reference_voice: bool
+    supports_named_voices: bool
+    supports_request_measurement: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredBundle:
+    """Normalized public catalog and installed-state information for a bundle."""
+
+    id: str
+    ref: str
+    display_name: str
+    aliases: tuple[str, ...]
+    languages: tuple[str, ...]
+    profiles: tuple[str, ...]
+    default_profile: str
+    sample_rate: int
+    source_revision: str
+    runtime_available: bool
+    installed_profiles: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("aliases", "languages", "profiles", "installed_profiles"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or any(not isinstance(item, str) for item in value):
+                raise TypeError(f"{name} must be a tuple of strings")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
