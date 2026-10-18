@@ -218,5 +218,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-chatterbox/_version.py
+chatterboxsynth/_version.py
 context_chatterboxsynth*.*
