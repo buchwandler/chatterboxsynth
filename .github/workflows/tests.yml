@@ -18,6 +18,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install package and development tools
         run: python -m pip install -e ".[cpu,dev]"
+      - name: Verify SoXR runtime dependency
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+
+          installed = version("soxr")
+          print(f"soxr={installed}")
+          if installed != "1.1.0":
+              raise SystemExit(f"Expected soxr 1.1.0, got {installed}")
+          PY
       - name: Download only the revision-pinned tokenizer fixtures
         run: |
           mkdir -p .ci-tokenizers

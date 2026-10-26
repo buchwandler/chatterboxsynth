@@ -27,7 +27,7 @@ dependencies = [
   "tokenizers>=0.20,<1",
   "onnxvoice>=0.2.11,<0.3",
   "soundfile>=0.12,<1",
-  "soxr>=0.5,<1",
+  "soxr==1.1.0",
 ]
 
 [project.optional-dependencies]

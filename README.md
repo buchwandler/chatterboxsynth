@@ -12,6 +12,8 @@ ChatterboxSynth 0.1.x requires a Chatterbox-capable OnnxVoice 0.2.x release.
 Install `chatterboxsynth[cpu]` for the default ONNX Runtime CPU provider or
 `chatterboxsynth[gpu]` for CUDA.
 
+ChatterboxSynth currently pins Python-SoXR 1.1.0 for reference-audio resampling.
+
 ## Quick start
 
 ```python
