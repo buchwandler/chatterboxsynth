@@ -4,7 +4,7 @@ This checklist prepares and verifies the first public release. It does not publi
 
 ## Release candidate: real-model gates
 
-Run these checks on a supported Linux CPU environment using the published release candidate and a user-provided, licensed `reference.wav`. Do not commit the recording or model artifacts. The first test covers Nano CPU; the second covers Turbo FP32. The optional Turbo q4f16 profile is not a universal CPU guarantee.
+Run these checks on a supported Linux CPU environment using the published release candidate and a user-provided, licensed `reference.wav`. Do not commit the recording or model artifacts. The first test covers Nano CPU; the second covers Turbo FP32. Turbo fp32 is the CPU-capable baseline, subject to available device memory. Turbo q4f16 is provider-dependent and is not a CPUExecutionProvider profile: the currently pinned published speech encoder requires `AveragePool` opset 19, which CPUExecutionProvider does not support. `from_pretrained()` rejects explicit q4f16 plus CPU requests before downloading, and checks resolved profiles before session creation; use Turbo fp32 for CPU or select a provider that supports the graph. No particular GPU provider is promised without end-to-end validation.
 
 Create an isolated environment and install the public release candidate:
 
@@ -92,7 +92,7 @@ assert samples.ndim == 1 and samples.size > 0
 assert np.isfinite(samples).all()
 ```
 
-Pass only if the real published Turbo export accepts the tag-containing text, synthesis completes, WAV output reopens correctly, and the runtime closes cleanly. Test `turbo/q4f16` only on a provider known to support its operators; do not treat it as a CPU release guarantee.
+For any q4f16 provider-support claim, verify open, `prepare_voice()`, token generation, conditional-decoder inference, a finite mono 24 kHz WAV, and clean close; session creation alone is insufficient. Pass the Turbo FP32 gate only if the real published export accepts the tag-containing text, synthesis completes, WAV output reopens correctly, and the runtime closes cleanly. Do not claim support for a provider until its full end-to-end matrix passes.
 
 ## Metadata consistency checklist
 
@@ -102,7 +102,7 @@ Confirm the release notes, README, package metadata, documentation, and tagged d
 - Supported runtime models: Chatterbox Nano v2 and Turbo only.
 - Supported Python versions: 3.10 through 3.13.
 - Native output sample rate: 24 kHz.
-- Nano profiles: `cpu` and `fp32`; Turbo profiles: `fp32` and `q4f16` (subject to provider support).
+- Nano profiles: `cpu` and `fp32`; Turbo profiles: `fp32` (CPU-capable baseline subject to device memory) and `q4f16` (provider-dependent; the pinned graph is not compatible with CPUExecutionProvider).
 - Minimum Chatterbox-capable OnnxVoice: `0.2.11`; runtime remains cleanroom and does not depend on Chatterbox Python packages, Torch, Torchaudio, or Transformers.
 
 ## Tagged package and dependency checks

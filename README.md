@@ -37,6 +37,11 @@ with ChatterboxRuntime.from_pretrained("turbo", quality="fp32") as runtime:
     runtime.synthesize("Hello [chuckle] from Turbo.", voice=voice).save_wav("turbo.wav")
 ```
 
+## Turbo quality profiles
+
+- **Turbo fp32:** CPU-capable baseline, subject to available device memory.
+- **Turbo q4f16:** Provider-dependent, not a CPUExecutionProvider profile. The currently pinned published speech encoder requires `AveragePool` opset 19, which CPUExecutionProvider does not support. An explicit `quality="q4f16"` request with CPU is rejected before download; use Turbo fp32 for CPU or select an execution provider that supports the graph. No particular GPU provider is promised without end-to-end validation.
+
 Use `ChatterboxRuntime.load("/path/to/onnxvoice/install")` for an already-installed OnnxVoice bundle. This local path reads the install manifest and verifies artifact sizes and SHA-256 values; it does not query a catalog or access the network.
 
 For render-time opening of a managed model, use `ChatterboxRuntime.from_installed("nano", quality="cpu")`. It resolves and opens only a locally installed profile and never installs a model or refreshes a catalog. By contrast, `from_pretrained()` is the convenience path that may acquire and install a model.

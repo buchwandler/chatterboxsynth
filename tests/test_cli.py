@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import chatterboxsynth.__main__ as cli
+from chatterboxsynth.errors import ModelLoadError
 
 
 def test_models_command_uses_normalized_onnxvoice_items(monkeypatch, capsys) -> None:
@@ -43,3 +44,42 @@ def test_download_command_delegates_to_onnxvoice(monkeypatch, capsys, tmp_path) 
     assert calls["quality"] == "q4f16"
     assert calls["offline"] is True
     assert "Installed chatterbox:turbo" in capsys.readouterr().out
+
+
+def test_cli_turbo_q4f16_cpu_reports_compatibility_error(monkeypatch, capsys) -> None:
+    calls: dict[str, Any] = {}
+    message = (
+        "Chatterbox Turbo q4f16 is not compatible with CPUExecutionProvider "
+        "for the published ONNX graph (AveragePool opset 19). Use Turbo fp32 "
+        "for CPU, or select an execution provider that supports q4f16."
+    )
+
+    def reject(model: str, **kwargs: Any) -> None:
+        calls.update(model=model, **kwargs)
+        raise ModelLoadError(message)
+
+    monkeypatch.setattr(cli.ChatterboxRuntime, "from_pretrained", staticmethod(reject))
+    exit_code = cli.main(
+        [
+            "synth",
+            "--model",
+            "turbo",
+            "--quality",
+            "q4f16",
+            "--voice",
+            "reference.wav",
+            "--text",
+            "hello",
+            "--output",
+            "out.wav",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert calls["model"] == "turbo"
+    assert calls["quality"] == "q4f16"
+    assert calls["provider"] == "cpu"
+    assert "q4f16" in captured.err
+    assert "CPUExecutionProvider" in captured.err
+    assert "AveragePool" in captured.err

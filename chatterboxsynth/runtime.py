@@ -40,6 +40,29 @@ _LOCAL_STATIC_ROLES = {
 }
 
 
+def _is_explicit_cpu_only(provider: str | Sequence[str] | None) -> bool:
+    normalized = normalize_providers(provider)
+    return normalized == "CPUExecutionProvider" or (
+        normalized is not None
+        and not isinstance(normalized, str)
+        and tuple(normalized) == ("CPUExecutionProvider",)
+    )
+
+
+def _validate_profile_provider(
+    *,
+    model: str,
+    profile: str,
+    provider: str | Sequence[str] | None,
+) -> None:
+    if model == "turbo" and profile == "q4f16" and _is_explicit_cpu_only(provider):
+        raise ModelLoadError(
+            "Chatterbox Turbo q4f16 is not compatible with CPUExecutionProvider "
+            "for the published ONNX graph (AveragePool opset 19). Use Turbo fp32 "
+            "for CPU, or select an execution provider that supports q4f16."
+        )
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -253,8 +276,10 @@ class ChatterboxRuntime:
     ) -> ChatterboxRuntime:
         """Install through OnnxVoice and open its cleanroom graph adapter."""
         ref, bundle_id = normalize_model_ref(model)
-        if quality is not None and quality not in _PROFILES[bundle_id]:
-            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
+        if quality is not None:
+            if quality not in _PROFILES[bundle_id]:
+                raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
+            _validate_profile_provider(model=bundle_id, profile=quality, provider=provider)
         module = onnxvoice_module()
         manager = module.OnnxVoice(
             cache_dir=cache_dir,
@@ -267,6 +292,10 @@ class ChatterboxRuntime:
             force=force_download,
             progress=progress,
         )
+        model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
+            installation
+        )
+        _validate_profile_provider(model=model_id, profile=profile, provider=provider)
         adapter = manager.open(
             installation,
             providers=normalize_providers(provider),
@@ -274,9 +303,6 @@ class ChatterboxRuntime:
             session_options=session_options,
         )
         try:
-            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
-                installation
-            )
             tokenizer_path = installation.artifact("tokenizer").path
             frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
             return cls(
@@ -308,8 +334,10 @@ class ChatterboxRuntime:
     ) -> ChatterboxRuntime:
         """Open an existing managed installation without catalog or network access."""
         ref, bundle_id = normalize_model_ref(model)
-        if quality is not None and quality not in _PROFILES[bundle_id]:
-            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
+        if quality is not None:
+            if quality not in _PROFILES[bundle_id]:
+                raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
+
         module = onnxvoice_module()
         manager = module.OnnxVoice(cache_dir=cache_dir)
         try:
@@ -321,6 +349,10 @@ class ChatterboxRuntime:
                     f"Chatterbox model {ref!r} with quality={quality!r} is not installed"
                 ) from exc
             raise
+        model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
+            installation
+        )
+        _validate_profile_provider(model=model_id, profile=profile, provider=provider)
         adapter = manager.open(
             installation,
             providers=normalize_providers(provider),
@@ -328,9 +360,6 @@ class ChatterboxRuntime:
             session_options=session_options,
         )
         try:
-            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
-                installation
-            )
             tokenizer_path = installation.artifact("tokenizer").path
             frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
             return cls(
@@ -386,6 +415,7 @@ class ChatterboxRuntime:
             raise ModelLoadError(
                 f"Local installation contains profile {profile!r}, not the requested {quality!r}"
             )
+        _validate_profile_provider(model=bundle_id, profile=profile, provider=provider)
         installation_view = type(
             "LocalInstallationView",
             (),
@@ -399,6 +429,7 @@ class ChatterboxRuntime:
         model_id, selected, revision, rate, runtime_values, frontend_metadata = (
             _installation_fields(installation_view)
         )
+        _validate_profile_provider(model=model_id, profile=selected, provider=provider)
         files, artifact_metadata = _local_files(root, manifest, model_id, selected)
         module = onnxvoice_module()
         adapter = module.open_local(

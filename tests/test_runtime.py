@@ -100,6 +100,50 @@ def make_managed_installation(tmp_path: Path, *, profile: str = "cpu") -> Any:
     )
 
 
+def make_turbo_installation(tmp_path: Path, *, profile: str = "q4f16") -> Any:
+    metadata = {
+        "selected_quality": profile,
+        "source_revision": REVISION,
+        "runtime": {
+            "profile": profile,
+            "default_max_new_tokens": 12,
+            "default_repetition_penalty": 1.1,
+        },
+        "frontend": {"tokenizer_contract": "turbo"},
+    }
+    return SimpleNamespace(
+        id="turbo",
+        system="chatterbox",
+        sample_rate=24_000,
+        metadata=metadata,
+        artifact=lambda role: SimpleNamespace(path=tmp_path / f"{role}.json"),
+    )
+
+
+def patch_pretrained_manager(
+    monkeypatch: Any,
+    installation: Any,
+    adapter: FakeAdapter,
+    calls: dict[str, Any],
+) -> None:
+    class Manager:
+        def __init__(self, **kwargs: Any) -> None:
+            calls["manager"] = kwargs
+
+        def install(self, ref: str, **kwargs: Any) -> Any:
+            calls["install"] = (ref, kwargs)
+            return installation
+
+        def open(self, selected: Any, **kwargs: Any) -> FakeAdapter:
+            calls["open"] = (selected, kwargs)
+            return adapter
+
+    monkeypatch.setattr(
+        runtime_module, "onnxvoice_module", lambda: SimpleNamespace(OnnxVoice=Manager)
+    )
+    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", FakeFrontend)
+
+
 def patch_managed_manager(
     monkeypatch: Any,
     installation: Any,
@@ -355,6 +399,104 @@ def test_from_pretrained_normalizes_alias_and_forwards_profile_provider(
     assert calls["open"][1]["providers"] == "CPUExecutionProvider"
     runtime.close()
     assert adapter.close_calls == 1
+
+
+@pytest.mark.parametrize("provider", ["cpu", "CPUExecutionProvider", ("CPUExecutionProvider",)])
+def test_turbo_q4f16_rejects_explicit_cpu_before_install(monkeypatch: Any, provider: Any) -> None:
+    def unexpected_module() -> Any:
+        raise AssertionError("explicit q4f16 CPU must fail before OnnxVoice loads")
+
+    monkeypatch.setattr(runtime_module, "onnxvoice_module", unexpected_module)
+    with pytest.raises(ModelLoadError) as error:
+        ChatterboxRuntime.from_pretrained("turbo", quality="q4f16", provider=provider)
+    message = str(error.value)
+    for expected in ("q4f16", "CPUExecutionProvider", "AveragePool", "opset 19", "fp32"):
+        assert expected in message
+
+
+def test_turbo_q4f16_validates_resolved_metadata_before_open(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    installation = make_turbo_installation(tmp_path)
+    calls: dict[str, Any] = {}
+    patch_pretrained_manager(monkeypatch, installation, FakeAdapter(), calls)
+
+    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
+        ChatterboxRuntime.from_pretrained("turbo", provider="cpu")
+
+    assert calls["install"][1]["quality"] is None
+    assert "open" not in calls
+
+
+@pytest.mark.parametrize("provider", ["auto", None])
+def test_turbo_q4f16_auto_is_not_preemptively_rejected(
+    monkeypatch: Any, tmp_path: Path, provider: Any
+) -> None:
+    installation = make_turbo_installation(tmp_path)
+    adapter = FakeAdapter()
+    calls: dict[str, Any] = {}
+    patch_pretrained_manager(monkeypatch, installation, adapter, calls)
+
+    runtime = ChatterboxRuntime.from_pretrained("turbo", quality="q4f16", provider=provider)
+
+    assert "q4f16" in runtime_module._PROFILES["turbo"]
+    assert calls["open"][1]["providers"] is None
+    assert runtime.profile == "q4f16"
+    runtime.close()
+
+
+def test_turbo_fp32_cpu_contract_is_unchanged(monkeypatch: Any, tmp_path: Path) -> None:
+    installation = make_turbo_installation(tmp_path, profile="fp32")
+    adapter = FakeAdapter()
+    calls: dict[str, Any] = {}
+    patch_pretrained_manager(monkeypatch, installation, adapter, calls)
+
+    runtime = ChatterboxRuntime.from_pretrained("turbo", quality="fp32", provider="cpu")
+
+    assert calls["open"][1]["providers"] == "CPUExecutionProvider"
+    assert runtime.profile == "fp32"
+    runtime.close()
+
+
+def test_from_installed_turbo_q4f16_cpu_rejects_before_open(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    installation = make_turbo_installation(tmp_path)
+    calls: dict[str, Any] = {}
+    patch_managed_manager(monkeypatch, installation, FakeAdapter(), calls)
+
+    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
+        ChatterboxRuntime.from_installed(
+            "turbo", quality="q4f16", provider=("CPUExecutionProvider",)
+        )
+
+    assert calls["resolve"] == ("chatterbox:turbo", {"quality": "q4f16"})
+    assert "open" not in calls
+
+
+def test_load_turbo_q4f16_cpu_rejects_before_open_local(monkeypatch: Any, tmp_path: Path) -> None:
+    manifest = {
+        "schema": 3,
+        "system": "chatterbox",
+        "id": "turbo",
+        "sample_rate": 24_000,
+        "metadata": {
+            "selected_quality": "q4f16",
+            "source_revision": REVISION,
+            "runtime": {"profile": "q4f16"},
+            "frontend": {"tokenizer_contract": "turbo"},
+        },
+        "artifacts": [],
+    }
+    (tmp_path / ".onnxvoice-install.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    class Module:
+        def open_local(self, **_: Any) -> FakeAdapter:
+            raise AssertionError("incompatible local profile must fail before open_local")
+
+    monkeypatch.setattr(runtime_module, "onnxvoice_module", lambda: Module())
+    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
+        ChatterboxRuntime.load(tmp_path, provider="CPUExecutionProvider")
 
 
 def _write_installation(root: Path) -> None:
