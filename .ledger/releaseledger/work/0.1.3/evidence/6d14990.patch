@@ -1,0 +1,398 @@
+ README.md                  |   5 ++
+ chatterboxsynth/runtime.py |  51 ++++++++++++----
+ docs/architecture.md       |   2 +
+ docs/release-0.1.0.md      |   6 +-
+ tests/test_cli.py          |  40 +++++++++++++
+ tests/test_runtime.py      | 142 +++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 233 insertions(+), 13 deletions(-)
+
+diff --git a/README.md b/README.md
+index c6d8cc8..8bedbc2 100644
+--- a/README.md
++++ b/README.md
+@@ -37,6 +37,11 @@ with ChatterboxRuntime.from_pretrained("turbo", quality="fp32") as runtime:
+     runtime.synthesize("Hello [chuckle] from Turbo.", voice=voice).save_wav("turbo.wav")
+ ```
+
++## Turbo quality profiles
++
++- **Turbo fp32:** CPU-capable baseline, subject to available device memory.
++- **Turbo q4f16:** Provider-dependent, not a CPUExecutionProvider profile. The currently pinned published speech encoder requires `AveragePool` opset 19, which CPUExecutionProvider does not support. An explicit `quality="q4f16"` request with CPU is rejected before download; use Turbo fp32 for CPU or select an execution provider that supports the graph. No particular GPU provider is promised without end-to-end validation.
++
+ Use `ChatterboxRuntime.load("/path/to/onnxvoice/install")` for an already-installed OnnxVoice bundle. This local path reads the install manifest and verifies artifact sizes and SHA-256 values; it does not query a catalog or access the network.
+
+ For render-time opening of a managed model, use `ChatterboxRuntime.from_installed("nano", quality="cpu")`. It resolves and opens only a locally installed profile and never installs a model or refreshes a catalog. By contrast, `from_pretrained()` is the convenience path that may acquire and install a model.
+diff --git a/chatterboxsynth/runtime.py b/chatterboxsynth/runtime.py
+index e63f97a..3b157fe 100644
+--- a/chatterboxsynth/runtime.py
++++ b/chatterboxsynth/runtime.py
+@@ -40,6 +40,29 @@ _LOCAL_STATIC_ROLES = {
+ }
+
+
++def _is_explicit_cpu_only(provider: str | Sequence[str] | None) -> bool:
++    normalized = normalize_providers(provider)
++    return normalized == "CPUExecutionProvider" or (
++        normalized is not None
++        and not isinstance(normalized, str)
++        and tuple(normalized) == ("CPUExecutionProvider",)
++    )
++
++
++def _validate_profile_provider(
++    *,
++    model: str,
++    profile: str,
++    provider: str | Sequence[str] | None,
++) -> None:
++    if model == "turbo" and profile == "q4f16" and _is_explicit_cpu_only(provider):
++        raise ModelLoadError(
++            "Chatterbox Turbo q4f16 is not compatible with CPUExecutionProvider "
++            "for the published ONNX graph (AveragePool opset 19). Use Turbo fp32 "
++            "for CPU, or select an execution provider that supports q4f16."
++        )
++
++
+ def _file_sha256(path: Path) -> str:
+     digest = hashlib.sha256()
+     with path.open("rb") as handle:
+@@ -253,8 +276,10 @@ class ChatterboxRuntime:
+     ) -> ChatterboxRuntime:
+         """Install through OnnxVoice and open its cleanroom graph adapter."""
+         ref, bundle_id = normalize_model_ref(model)
+-        if quality is not None and quality not in _PROFILES[bundle_id]:
+-            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
++        if quality is not None:
++            if quality not in _PROFILES[bundle_id]:
++                raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
++            _validate_profile_provider(model=bundle_id, profile=quality, provider=provider)
+         module = onnxvoice_module()
+         manager = module.OnnxVoice(
+             cache_dir=cache_dir,
+@@ -267,6 +292,10 @@ class ChatterboxRuntime:
+             force=force_download,
+             progress=progress,
+         )
++        model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
++            installation
++        )
++        _validate_profile_provider(model=model_id, profile=profile, provider=provider)
+         adapter = manager.open(
+             installation,
+             providers=normalize_providers(provider),
+@@ -274,9 +303,6 @@ class ChatterboxRuntime:
+             session_options=session_options,
+         )
+         try:
+-            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
+-                installation
+-            )
+             tokenizer_path = installation.artifact("tokenizer").path
+             frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
+             return cls(
+@@ -308,8 +334,10 @@ class ChatterboxRuntime:
+     ) -> ChatterboxRuntime:
+         """Open an existing managed installation without catalog or network access."""
+         ref, bundle_id = normalize_model_ref(model)
+-        if quality is not None and quality not in _PROFILES[bundle_id]:
+-            raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
++        if quality is not None:
++            if quality not in _PROFILES[bundle_id]:
++                raise ValueError(f"Unsupported profile {quality!r} for {bundle_id}")
++
+         module = onnxvoice_module()
+         manager = module.OnnxVoice(cache_dir=cache_dir)
+         try:
+@@ -321,6 +349,10 @@ class ChatterboxRuntime:
+                     f"Chatterbox model {ref!r} with quality={quality!r} is not installed"
+                 ) from exc
+             raise
++        model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
++            installation
++        )
++        _validate_profile_provider(model=model_id, profile=profile, provider=provider)
+         adapter = manager.open(
+             installation,
+             providers=normalize_providers(provider),
+@@ -328,9 +360,6 @@ class ChatterboxRuntime:
+             session_options=session_options,
+         )
+         try:
+-            model_id, profile, revision, rate, runtime, frontend_metadata = _installation_fields(
+-                installation
+-            )
+             tokenizer_path = installation.artifact("tokenizer").path
+             frontend = ChatterboxFrontend(tokenizer_path, frontend_metadata["tokenizer_contract"])
+             return cls(
+@@ -386,6 +415,7 @@ class ChatterboxRuntime:
+             raise ModelLoadError(
+                 f"Local installation contains profile {profile!r}, not the requested {quality!r}"
+             )
++        _validate_profile_provider(model=bundle_id, profile=profile, provider=provider)
+         installation_view = type(
+             "LocalInstallationView",
+             (),
+@@ -399,6 +429,7 @@ class ChatterboxRuntime:
+         model_id, selected, revision, rate, runtime_values, frontend_metadata = (
+             _installation_fields(installation_view)
+         )
++        _validate_profile_provider(model=model_id, profile=selected, provider=provider)
+         files, artifact_metadata = _local_files(root, manifest, model_id, selected)
+         module = onnxvoice_module()
+         adapter = module.open_local(
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 55e7549..16dbd7b 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -11,3 +11,5 @@ ChatterboxSynth is a thin user-facing synthesis layer over OnnxVoice.
+ The request boundary is owned by ChatterboxSynth: `measure_request()` counts the exact model token IDs from its export-specific frontend, including EOT handling, without reference preparation or inference. Current bundles declare no finite input-token maximum; `default_max_new_tokens` is solely an output-generation cap. `discover_bundles()` combines normalized pinned catalog metadata with local installed-profile inventory and never opens sessions or installs assets. The bundle catalog owns source revisions and profile metadata, while OnnxVoice owns catalog access, local installation resolution, and graph execution. No VoiceRender concepts or dependencies belong in this package.
+
+ The initial API supports English Nano v2 (`cpu`, `fp32`) and Turbo (`fp32`, `q4f16`) only. Synthesis is greedy and single-request: no random sampling, sentence splitting, chunk stitching, watermark, or persistent voice cache is added.
++
++Turbo fp32 is the CPU-capable baseline profile, subject to device memory. Turbo q4f16 is provider-dependent and is not compatible with CPUExecutionProvider for the currently pinned published speech encoder (`AveragePool` opset 19). `from_pretrained()` rejects explicit q4f16 plus CPU requests before downloading, and checks resolved metadata before opening; managed and local installations are checked before session creation. `auto` and `None` still delegate provider choice; q4f16 remains available for providers that support the published graph. This does not assert support for any specific GPU provider.
+diff --git a/docs/release-0.1.0.md b/docs/release-0.1.0.md
+index 137ad42..c0a6f67 100644
+--- a/docs/release-0.1.0.md
++++ b/docs/release-0.1.0.md
+@@ -4,7 +4,7 @@ This checklist prepares and verifies the first public release. It does not publi
+
+ ## Release candidate: real-model gates
+
+-Run these checks on a supported Linux CPU environment using the published release candidate and a user-provided, licensed `reference.wav`. Do not commit the recording or model artifacts. The first test covers Nano CPU; the second covers Turbo FP32. The optional Turbo q4f16 profile is not a universal CPU guarantee.
++Run these checks on a supported Linux CPU environment using the published release candidate and a user-provided, licensed `reference.wav`. Do not commit the recording or model artifacts. The first test covers Nano CPU; the second covers Turbo FP32. Turbo fp32 is the CPU-capable baseline, subject to available device memory. Turbo q4f16 is provider-dependent and is not a CPUExecutionProvider profile: the currently pinned published speech encoder requires `AveragePool` opset 19, which CPUExecutionProvider does not support. `from_pretrained()` rejects explicit q4f16 plus CPU requests before downloading, and checks resolved profiles before session creation; use Turbo fp32 for CPU or select a provider that supports the graph. No particular GPU provider is promised without end-to-end validation.
+
+ Create an isolated environment and install the public release candidate:
+
+@@ -92,7 +92,7 @@ assert samples.ndim == 1 and samples.size > 0
+ assert np.isfinite(samples).all()
+ ```
+
+-Pass only if the real published Turbo export accepts the tag-containing text, synthesis completes, WAV output reopens correctly, and the runtime closes cleanly. Test `turbo/q4f16` only on a provider known to support its operators; do not treat it as a CPU release guarantee.
++For any q4f16 provider-support claim, verify open, `prepare_voice()`, token generation, conditional-decoder inference, a finite mono 24 kHz WAV, and clean close; session creation alone is insufficient. Pass the Turbo FP32 gate only if the real published export accepts the tag-containing text, synthesis completes, WAV output reopens correctly, and the runtime closes cleanly. Do not claim support for a provider until its full end-to-end matrix passes.
+
+ ## Metadata consistency checklist
+
+@@ -102,7 +102,7 @@ Confirm the release notes, README, package metadata, documentation, and tagged d
+ - Supported runtime models: Chatterbox Nano v2 and Turbo only.
+ - Supported Python versions: 3.10 through 3.13.
+ - Native output sample rate: 24 kHz.
+-- Nano profiles: `cpu` and `fp32`; Turbo profiles: `fp32` and `q4f16` (subject to provider support).
++- Nano profiles: `cpu` and `fp32`; Turbo profiles: `fp32` (CPU-capable baseline subject to device memory) and `q4f16` (provider-dependent; the pinned graph is not compatible with CPUExecutionProvider).
+ - Minimum Chatterbox-capable OnnxVoice: `0.2.11`; runtime remains cleanroom and does not depend on Chatterbox Python packages, Torch, Torchaudio, or Transformers.
+
+ ## Tagged package and dependency checks
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 91cda14..8ce4b5f 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -4,6 +4,7 @@ from types import SimpleNamespace
+ from typing import Any
+
+ import chatterboxsynth.__main__ as cli
++from chatterboxsynth.errors import ModelLoadError
+
+
+ def test_models_command_uses_normalized_onnxvoice_items(monkeypatch, capsys) -> None:
+@@ -43,3 +44,42 @@ def test_download_command_delegates_to_onnxvoice(monkeypatch, capsys, tmp_path)
+     assert calls["quality"] == "q4f16"
+     assert calls["offline"] is True
+     assert "Installed chatterbox:turbo" in capsys.readouterr().out
++
++
++def test_cli_turbo_q4f16_cpu_reports_compatibility_error(monkeypatch, capsys) -> None:
++    calls: dict[str, Any] = {}
++    message = (
++        "Chatterbox Turbo q4f16 is not compatible with CPUExecutionProvider "
++        "for the published ONNX graph (AveragePool opset 19). Use Turbo fp32 "
++        "for CPU, or select an execution provider that supports q4f16."
++    )
++
++    def reject(model: str, **kwargs: Any) -> None:
++        calls.update(model=model, **kwargs)
++        raise ModelLoadError(message)
++
++    monkeypatch.setattr(cli.ChatterboxRuntime, "from_pretrained", staticmethod(reject))
++    exit_code = cli.main(
++        [
++            "synth",
++            "--model",
++            "turbo",
++            "--quality",
++            "q4f16",
++            "--voice",
++            "reference.wav",
++            "--text",
++            "hello",
++            "--output",
++            "out.wav",
++        ]
++    )
++
++    captured = capsys.readouterr()
++    assert exit_code == 2
++    assert calls["model"] == "turbo"
++    assert calls["quality"] == "q4f16"
++    assert calls["provider"] == "cpu"
++    assert "q4f16" in captured.err
++    assert "CPUExecutionProvider" in captured.err
++    assert "AveragePool" in captured.err
+diff --git a/tests/test_runtime.py b/tests/test_runtime.py
+index 1a81057..f177fc5 100644
+--- a/tests/test_runtime.py
++++ b/tests/test_runtime.py
+@@ -100,6 +100,50 @@ def make_managed_installation(tmp_path: Path, *, profile: str = "cpu") -> Any:
+     )
+
+
++def make_turbo_installation(tmp_path: Path, *, profile: str = "q4f16") -> Any:
++    metadata = {
++        "selected_quality": profile,
++        "source_revision": REVISION,
++        "runtime": {
++            "profile": profile,
++            "default_max_new_tokens": 12,
++            "default_repetition_penalty": 1.1,
++        },
++        "frontend": {"tokenizer_contract": "turbo"},
++    }
++    return SimpleNamespace(
++        id="turbo",
++        system="chatterbox",
++        sample_rate=24_000,
++        metadata=metadata,
++        artifact=lambda role: SimpleNamespace(path=tmp_path / f"{role}.json"),
++    )
++
++
++def patch_pretrained_manager(
++    monkeypatch: Any,
++    installation: Any,
++    adapter: FakeAdapter,
++    calls: dict[str, Any],
++) -> None:
++    class Manager:
++        def __init__(self, **kwargs: Any) -> None:
++            calls["manager"] = kwargs
++
++        def install(self, ref: str, **kwargs: Any) -> Any:
++            calls["install"] = (ref, kwargs)
++            return installation
++
++        def open(self, selected: Any, **kwargs: Any) -> FakeAdapter:
++            calls["open"] = (selected, kwargs)
++            return adapter
++
++    monkeypatch.setattr(
++        runtime_module, "onnxvoice_module", lambda: SimpleNamespace(OnnxVoice=Manager)
++    )
++    monkeypatch.setattr(runtime_module, "ChatterboxFrontend", FakeFrontend)
++
++
+ def patch_managed_manager(
+     monkeypatch: Any,
+     installation: Any,
+@@ -357,6 +401,104 @@ def test_from_pretrained_normalizes_alias_and_forwards_profile_provider(
+     assert adapter.close_calls == 1
+
+
++@pytest.mark.parametrize("provider", ["cpu", "CPUExecutionProvider", ("CPUExecutionProvider",)])
++def test_turbo_q4f16_rejects_explicit_cpu_before_install(monkeypatch: Any, provider: Any) -> None:
++    def unexpected_module() -> Any:
++        raise AssertionError("explicit q4f16 CPU must fail before OnnxVoice loads")
++
++    monkeypatch.setattr(runtime_module, "onnxvoice_module", unexpected_module)
++    with pytest.raises(ModelLoadError) as error:
++        ChatterboxRuntime.from_pretrained("turbo", quality="q4f16", provider=provider)
++    message = str(error.value)
++    for expected in ("q4f16", "CPUExecutionProvider", "AveragePool", "opset 19", "fp32"):
++        assert expected in message
++
++
++def test_turbo_q4f16_validates_resolved_metadata_before_open(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    installation = make_turbo_installation(tmp_path)
++    calls: dict[str, Any] = {}
++    patch_pretrained_manager(monkeypatch, installation, FakeAdapter(), calls)
++
++    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
++        ChatterboxRuntime.from_pretrained("turbo", provider="cpu")
++
++    assert calls["install"][1]["quality"] is None
++    assert "open" not in calls
++
++
++@pytest.mark.parametrize("provider", ["auto", None])
++def test_turbo_q4f16_auto_is_not_preemptively_rejected(
++    monkeypatch: Any, tmp_path: Path, provider: Any
++) -> None:
++    installation = make_turbo_installation(tmp_path)
++    adapter = FakeAdapter()
++    calls: dict[str, Any] = {}
++    patch_pretrained_manager(monkeypatch, installation, adapter, calls)
++
++    runtime = ChatterboxRuntime.from_pretrained("turbo", quality="q4f16", provider=provider)
++
++    assert "q4f16" in runtime_module._PROFILES["turbo"]
++    assert calls["open"][1]["providers"] is None
++    assert runtime.profile == "q4f16"
++    runtime.close()
++
++
++def test_turbo_fp32_cpu_contract_is_unchanged(monkeypatch: Any, tmp_path: Path) -> None:
++    installation = make_turbo_installation(tmp_path, profile="fp32")
++    adapter = FakeAdapter()
++    calls: dict[str, Any] = {}
++    patch_pretrained_manager(monkeypatch, installation, adapter, calls)
++
++    runtime = ChatterboxRuntime.from_pretrained("turbo", quality="fp32", provider="cpu")
++
++    assert calls["open"][1]["providers"] == "CPUExecutionProvider"
++    assert runtime.profile == "fp32"
++    runtime.close()
++
++
++def test_from_installed_turbo_q4f16_cpu_rejects_before_open(
++    monkeypatch: Any, tmp_path: Path
++) -> None:
++    installation = make_turbo_installation(tmp_path)
++    calls: dict[str, Any] = {}
++    patch_managed_manager(monkeypatch, installation, FakeAdapter(), calls)
++
++    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
++        ChatterboxRuntime.from_installed(
++            "turbo", quality="q4f16", provider=("CPUExecutionProvider",)
++        )
++
++    assert calls["resolve"] == ("chatterbox:turbo", {"quality": "q4f16"})
++    assert "open" not in calls
++
++
++def test_load_turbo_q4f16_cpu_rejects_before_open_local(monkeypatch: Any, tmp_path: Path) -> None:
++    manifest = {
++        "schema": 3,
++        "system": "chatterbox",
++        "id": "turbo",
++        "sample_rate": 24_000,
++        "metadata": {
++            "selected_quality": "q4f16",
++            "source_revision": REVISION,
++            "runtime": {"profile": "q4f16"},
++            "frontend": {"tokenizer_contract": "turbo"},
++        },
++        "artifacts": [],
++    }
++    (tmp_path / ".onnxvoice-install.json").write_text(json.dumps(manifest), encoding="utf-8")
++
++    class Module:
++        def open_local(self, **_: Any) -> FakeAdapter:
++            raise AssertionError("incompatible local profile must fail before open_local")
++
++    monkeypatch.setattr(runtime_module, "onnxvoice_module", lambda: Module())
++    with pytest.raises(ModelLoadError, match="AveragePool opset 19"):
++        ChatterboxRuntime.load(tmp_path, provider="CPUExecutionProvider")
++
++
+ def _write_installation(root: Path) -> None:
+     profiles = {
+         "cpu": {

@@ -1,0 +1,30 @@
+{
+  "candidate_count": 1,
+  "candidates": [
+    {
+      "additions": 233,
+      "deletions": 13,
+      "patch_file": "6d14990.patch",
+      "patch_sha256": "cead9c0192710f34a4c3b20498d56ad9b888ca3c9c780d08e940135462b5686f",
+      "paths": [
+        "README.md",
+        "chatterboxsynth/runtime.py",
+        "docs/architecture.md",
+        "docs/release-0.1.0.md",
+        "tests/test_cli.py",
+        "tests/test_runtime.py"
+      ],
+      "sha": "6d1499043dd6ccb310fbb11b477aad68e73a84ed",
+      "short_sha": "6d14990",
+      "source_ref": "git:6d1499043dd6ccb310fbb11b477aad68e73a84ed"
+    }
+  ],
+  "git_base_ref": "15e98df4d0d994f218af0e7b659d2fff36844d53",
+  "git_base_sha": "15e98df4d0d994f218af0e7b659d2fff36844d53",
+  "git_head_ref": "6d1499043dd6ccb310fbb11b477aad68e73a84ed",
+  "git_head_sha": "6d1499043dd6ccb310fbb11b477aad68e73a84ed",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "0.1.3",
+  "schema_version": 1
+}

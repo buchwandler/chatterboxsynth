@@ -1,0 +1,34 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: 0.1.3
+git_base_ref: v0.1.2
+git_base_sha: 15e98df4d0d994f218af0e7b659d2fff36844d53
+git_head_ref: HEAD
+git_head_sha: 6d1499043dd6ccb310fbb11b477aad68e73a84ed
+git_range: 15e98df4d0d994f218af0e7b659d2fff36844d53..6d1499043dd6ccb310fbb11b477aad68e73a84ed
+commit_count: 1
+rows:
+  - sha: 6d1499043dd6ccb310fbb11b477aad68e73a84ed
+    source_ref: git:6d1499043dd6ccb310fbb11b477aad68e73a84ed
+    short_sha: 6d14990
+    changed_paths:
+      - README.md
+      - chatterboxsynth/runtime.py
+      - docs/architecture.md
+      - docs/release-0.1.0.md
+      - tests/test_cli.py
+      - tests/test_runtime.py
+    stats:
+      files_changed: 6
+      insertions: 233
+      deletions: 13
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: fix turbo model"

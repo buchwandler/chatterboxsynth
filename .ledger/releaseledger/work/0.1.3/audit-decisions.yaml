@@ -1,0 +1,17 @@
+rows:
+  - sha: 6d1499043dd6ccb310fbb11b477aad68e73a84ed
+    inspected: true
+    inspected_paths:
+      - README.md
+      - chatterboxsynth/runtime.py
+      - docs/architecture.md
+      - docs/release-0.1.0.md
+      - tests/test_cli.py
+      - tests/test_runtime.py
+    observed_behavior: "Rejects explicit Turbo q4f16 CPU provider requests before model acquisition or session creation, documents provider constraints, and adds regression coverage for managed and local loading paths."
+    public_impact: public
+    decision: accepted
+    target_entry_key: turbo-q4f16-provider-validation
+    target_entry_id: null
+    notes: ""
+    stale: false
